@@ -1,7 +1,4 @@
 # Sentiment-oriented Sarcasm Integration for Video Sentiment Analysis Enhancement with Sarcasm Assistance
-## Pretrained Models
-For visual encoder and acoustic encoder, we use the pre-trained weights in HKT. The weights file can be downloaded in https://github.com/matalvepu/HKT
-
 ## Training
 
 You can run the below code to train PS2RI:
