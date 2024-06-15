@@ -37,14 +37,15 @@ from transformers import (
     get_cosine_schedule_with_warmup,
 )
 # from new_models1 import *
-from ps2r_models import *
-from sar_models import Sarcasm
+from sar_models import *
 from transformers.optimization import AdamW
 import time
-from copy import deepcopy
 import pandas as pd
+from copy import deepcopy
 from openpyxl import load_workbook
 import warnings
+import os
+os.environ['CURL_CA_BUNDLE'] = ''
 warnings.filterwarnings("ignore")
 
 def return_unk():
@@ -122,9 +123,6 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
     return pop_count
 
 
-# albert tokenizer split words in to subwords. "_" marker helps to find thos sub words
-# our acoustic and visual features are aligned on word level. So we just create copy the same
-# visual/acoustic vectors that belong to same word.
 def get_inversion(tokens, SPIECE_MARKER="▁"):
     inversion_index = -1
     inversions = []
@@ -152,6 +150,8 @@ def convert_sarcasm_to_features(examples, tokenizer, sarcasm=False, sentiment=Fa
             ee
         ) = example
         if (sarcasm and sar==1) or (sentiment and sar==0) or (sarcasm == False and sar==0) or (sentiment == False and sar == 1):
+            if len(features) < 10:
+                print(se)
             text_a = ". ".join(c_words)
             text_b = p_words + "."
             tokens_a = tokenizer.tokenize(text_a)
@@ -258,7 +258,7 @@ def convert_sarcasm_to_features(examples, tokenizer, sarcasm=False, sentiment=Fa
 
 def get_appropriate_dataset(data, tokenizer, parition, sarcasm=False, sentiment=False):
     features = convert_sarcasm_to_features(data, tokenizer, sarcasm, sentiment)
-    print(sarcasm, '  ', sentiment, '    ', len(features))
+    print(sarcasm, '  ',sentiment, '    ',len(features))
     all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
     all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
@@ -410,12 +410,12 @@ def set_up_data_loader():
     return train_dataloader, dev_dataloader, dev_dataloader_sarcasm, dev_dataloader_sentiment, test_dataloader, test_dataloader_sarcasm, test_dataloader_sentiment
 
 
-def train_epoch(model, sar_model, train_dataloader, optimizer, scheduler):
+def train_epoch(model, train_dataloader, optimizer, scheduler):
     model.train()
-    sar_model.eval()
     tr_loss = 0
     nb_tr_examples, nb_tr_steps = 0, 0
     outputs=None
+    # for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
     for step, batch in tqdm(enumerate(train_dataloader)):
 
         batch = tuple(t.to(args.device) for t in batch)
@@ -467,15 +467,8 @@ def train_epoch(model, sar_model, train_dataloader, optimizer, scheduler):
                 visual
             )
         elif args.model == "our":
-            model = model.cpu()
-            sar_model.to(args.device)
-            sarcasm_out,_ = sar_model(input_ids, visual, acoustic, token_type_ids=segment_ids, attention_mask=input_mask)
-            sar_model = sar_model.cpu()
-            model.to(args.device)
-            outputs = model(input_ids, visual, acoustic, sarcasm_out, token_type_ids=segment_ids, attention_mask=input_mask, )
-
+            _,outputs = model(input_ids, visual, acoustic, token_type_ids=segment_ids, attention_mask=input_mask, )
         si_out = outputs
-
 
 
         loss = F.cross_entropy(si_out, si_ids.long())
@@ -496,16 +489,16 @@ def train_epoch(model, sar_model, train_dataloader, optimizer, scheduler):
 
 
 
-def eval_epoch(model, sar_model, data_loader):
+def eval_epoch(model, data_loader):
     """ Epoch operation in evaluation phase """
     model.eval()
-    sar_model.eval()
+
     eval_loss = 0.0
     nb_eval_steps = 0
 
     si_preds = []
     with torch.no_grad():
-        for step, batch in tqdm(enumerate(data_loader)):
+        for step, batch in enumerate(tqdm(data_loader)):
         # for step, batch in enumerate(tqdm(data_loader, desc="Iteration")):
 
             batch = tuple(t.to(args.device) for t in batch)
@@ -557,16 +550,12 @@ def eval_epoch(model, sar_model, data_loader):
                     visual
                 )
             elif args.model == "our":
-                # model = model.cpu()
-                sar_model.to(args.device)
-                model.to(args.device)
-                sarcasm_out,_ = sar_model(input_ids, visual, acoustic, token_type_ids=segment_ids,
-                                                 attention_mask=input_mask)
-                outputs = model(input_ids, visual, acoustic, sarcasm_out, token_type_ids=segment_ids,
-                                attention_mask=input_mask, )
+                _,outputs = model(input_ids, visual, acoustic, token_type_ids=segment_ids,
+                            attention_mask=input_mask, )
+
             si_out = outputs
 
-            tmp_eval_loss = F.cross_entropy(si_out, si_ids.long())
+            tmp_eval_loss = F.cross_entropy(si_out, se_ids.long())
 
             eval_loss += tmp_eval_loss.mean().item()
             nb_eval_steps += 1
@@ -580,11 +569,12 @@ def eval_epoch(model, sar_model, data_loader):
 
         eval_loss = eval_loss / nb_eval_steps
 
+
     return si_preds, si_labels, eval_loss
 
 
-def test_score_model(model, sar_model, data_loader):
-    se_preds, se_labels, test_loss = eval_epoch(model, sar_model, data_loader)
+def test_score_model(model, data_loader):
+    se_preds, se_labels, test_loss = eval_epoch(model, data_loader)
 
     se_acc = accuracy_score(se_labels.cpu(), torch.argmax(se_preds, -1))
     se_f1 = f1_score(se_labels.cpu(), torch.argmax(se_preds.cpu(), -1), labels=[0, 1, 2],average='micro')
@@ -601,16 +591,15 @@ def test_score_model(model, sar_model, data_loader):
           f"Pre { format( se_precision , '.4f') } | "
           f"R { format(se_recall, '.4f') } | "
           f"F1 { format(se_f1, '.4f') } \n"
-          f"Weigfhted:  Pre { format( se_precision_weight , '.4f') } | "
-          f"R { format(se_recall_weight, '.4f') } | "
-          f"F1 { format(se_f1_weight, '.4f') } |")
-
+          f"Macro:  Pre { format( se_precision_macro , '.4f') } | "
+          f"R { format(se_recall_macro, '.4f') } | "
+          f"F1 { format(se_f1_macro, '.4f') } |")
+    
     return se_acc, se_precision, se_recall, se_f1, se_precision_macro, se_recall_macro, se_f1_macro, se_precision_weight, se_recall_weight, se_f1_weight, test_loss
 
 
 def train(
         model,
-        sar_model,
         train_dataloader,
         dev_dataloader,
         dev_dataloader_sarcasm,
@@ -630,34 +619,36 @@ def train(
     n_epochs = args.epochs
     start_time = time.time()
     for epoch_i in range(n_epochs):
+        # if epoch_i - best_epoch > 15:
+        #     break
         train_time = time.time()
-        train_loss = train_epoch(model, sar_model, train_dataloader, optimizer, scheduler)
+        train_loss = train_epoch(model, train_dataloader, optimizer, scheduler)
         print(
             "\nepoch:{},train_loss: {}, train_time:{} s".format(
                 epoch_i, format(train_loss, '.4f'), format(time.time()-train_time, '.2f')
             )
         )
         # print(f"------------------- Dev epoch {epoch_i} -------------------")
-        dev_sar_acc, dev_precision, dev_recall, dev_f1, dev_precision_macro, dev_recall_macro, dev_f1_macro,dev_precision_weight, dev_recall_weight, dev_f1_weight, dev_loss = test_score_model(
-            model, sar_model, dev_dataloader)
+        dev_sar_acc, dev_precision, dev_recall, dev_f1, dev_precision_macro, dev_recall_macro, dev_f1_macro,dev_precision_weight, dev_recall_weight, dev_f1_weight,dev_loss = test_score_model(
+            model, dev_dataloader)
         dev_sarcasm_sar_acc, dev_sarcasm_precision, dev_sarcasm_recall, dev_sarcasm_f1, dev_sarcasm_precision_macro, dev_sarcasm_recall_macro, dev_sarcasm_f1_macro, _,_,_, dev_sarcasm_loss = test_score_model(
-            model, sar_model, dev_dataloader_sarcasm)
+            model, dev_dataloader_sarcasm)
         dev_sentiment_sar_acc, dev_sentiment_precision, dev_sentiment_recall, dev_sentiment_f1, dev_sentiment_precision_macro, dev_sentiment_recall_macro, dev_sentiment_f1_macro, _,_,_, dev_sentiment_loss = test_score_model(
-            model, sar_model, dev_dataloader_sentiment)
+            model, dev_dataloader_sentiment)
 
         valid_losses.append(dev_loss)
 
         # print(f"------------------- Test epoch {epoch_i} -------------------")
         test_sar_acc, test_precision, test_recall, test_f1, test_precision_macro, test_recall_macro, test_f1_macro, test_precision_weight, test_recall_weight, test_f1_weight, test_loss = test_score_model(
-            model, sar_model, test_dataloader)
+            model, test_dataloader)
         test_sarcasm_sar_acc, test_sarcasm_precision, test_sarcasm_recall, test_sarcasm_f1, test_sarcasm_precision_macro, test_sarcasm_recall_macro, test_sarcasm_f1_macro, test_sarcasm_precision_weight, test_sarcasm_recall_weight, test_sarcasm_f1_weight, test_sarcasm_loss = test_score_model(
-            model, sar_model, test_dataloader_sarcasm)
+            model, test_dataloader_sarcasm)
         test_sentiment_sar_acc, test_sentiment_precision, test_sentiment_recall, test_sentiment_f1, test_sentiment_precision_macro, test_sentiment_recall_macro, test_sentiment_f1_macro, test_sentiment_precision_weight, test_sentiment_recall_weight, test_sentiment_f1_weight, test_sentiment_loss = test_score_model(
-            model, sar_model, test_dataloader_sentiment)
+            model, test_dataloader_sentiment)
 
-        if (dev_f1_weight >= best_valid_f1):
+        if (dev_f1_macro >= best_valid_f1):
             best_valid_loss = dev_loss
-            best_valid_f1 = dev_f1_weight
+            best_valid_f1 = dev_f1_macro
             best_epoch = epoch_i
             best_test_acc = test_sar_acc
             best_test_pre = test_precision
@@ -698,6 +689,9 @@ def train(
                     os.mkdir(f'./output/{args.save_path}')
                 torch.save(model.state_dict(), f'./output/{args.save_path}' + run_name + '.pt')
 
+        # we report test_accuracy of the best valid loss (best_valid_test_accuracy)
+        # if not os.path.exists(f'./output/{args.save_path}'):
+        #     os.mkdir(f'./output/{args.save_path}')
 
         log_stats = {
                 "epoch":epoch_i,
@@ -750,8 +744,18 @@ def train(
             }
         with open(f'./output/si/{args.file_path}/{args.save_path}.txt', "a") as f:
             f.write(json.dumps(log_stats) + "\n")
+    # with open(f'./output/out/{args.save_path}.txt', "a") as f:
+    #     f.write("best epoch: %d" % best_epoch)
 
-    print(f"\nTotal time is {format((time.time()-start_time)/60,'.2f')} min")
+    log_stats = {
+        "best_epoch": best_epoch,
+        "best_test_acc": best_test_acc,
+        "best_test_pre": best_test_pre,
+        "best_test_recall": best_test_recall,
+        "best_test_f1": best_test_f1
+    }
+    with open(f'./output/si/{args.file_path}/{args.save_path}.txt', "a") as f:
+        f.write(json.dumps(log_stats) + "\n")
 
 
 def get_optimizer_scheduler(params, num_training_steps, learning_rate=1e-5):
@@ -791,17 +795,13 @@ def prep_for_training(num_training_steps):
 
     elif args.model == "visual_only":
         model = Transformer(VISUAL_DIM, num_layers=args.n_layers, nhead=args.n_heads, dim_feedforward=args.fc_dim)
+
     if args.model == "our":
         visual_model = Transformer(VISUAL_DIM, num_layers=8, nhead=4, dim_feedforward=1024)
-        sar_visual_model = Transformer(VISUAL_DIM, num_layers=8, nhead=4, dim_feedforward=1024)
         visual_model.load_state_dict(torch.load("./model_weights/init/sarcasm/sarcasmVisualTransformer.pt"))
         acoustic_model = Transformer(ACOUSTIC_DIM, num_layers=1, nhead=3, dim_feedforward=512)
-        sar_acoustic_model = Transformer(ACOUSTIC_DIM, num_layers=1, nhead=3, dim_feedforward=512)
         acoustic_model.load_state_dict(torch.load("./model_weights/init/sarcasm/sarcasmAcousticTransformer.pt"))
         text_model = AlbertModel.from_pretrained('./albert-base-v2')
-        sar_text_model = AlbertModel.from_pretrained('./albert-base-v2')
-        sarcasm_model = Sarcasm(sar_text_model, sar_visual_model, sar_acoustic_model, args, fusion_dim=args.sar_fusion_dim)
-        sarcasm_model.load_state_dict(torch.load(f'./output/sar_weight/{args.weight}' + '.pt'))
         model = Ours(text_model, visual_model, acoustic_model, args, fusion_dim=args.fusion_dim)
     else:
         raise ValueError("Requested model is not available")
@@ -835,7 +835,7 @@ def prep_for_training(num_training_steps):
         schedulers = [scheduler_l]
 
 
-    return model, sarcasm_model, optimizers, schedulers, loss_fct
+    return model, optimizers, schedulers, loss_fct
 
 
 def set_random_seed(seed):
@@ -868,13 +868,12 @@ def main():
     print("Dataset Loaded: ", args.dataset)
     num_training_steps = len(train_dataloader) * args.epochs
 
-    model, sar_model, optimizers, schedulers, loss_fct = prep_for_training(
+    model, optimizers, schedulers, loss_fct = prep_for_training(
         num_training_steps
     )
     print("Model Loaded: ", args.model)
     train(
         model,
-        sar_model,
         train_dataloader,
         dev_dataloader,
         dev_dataloader_sarcasm,
@@ -890,5 +889,5 @@ def main():
 
 
 if __name__ == "__main__":
-    if not os.path.exists(f'./output/si/out3/{args.save_path}.txt'):
-        main()#!/usr/bin/env python2
+    # if not os.path.exists(f'./output/si/{args.file_path}/{args.save_path}.txt'):
+    main()#!/usr/bin/env python2
