@@ -338,12 +338,12 @@ class Sarcasm(nn.Module):
         # for i in range(len(modal_fusion.shape[0])):
         #     features = modal_fusion[i,:].unsqueeze().detach().cpu().numpy()
         #     np.save(f'./output/sar_features/{id[i]}.npy',features)
-        # sentiment_embedding = F.max_pool1d(modal_fusion.permute(0,2,1).contiguous(), modal_fusion.shape[1]).squeeze(-1)
+        sentiment_embedding = F.max_pool1d(modal_fusion.permute(0,2,1).contiguous(), modal_fusion.shape[1]).squeeze(-1)
 
-        # se_out = self.se(sentiment_embedding)
+        se_out = self.se(sentiment_embedding)
 
-        return modal_fusion
-        # return modal_fusion, se_out
+        # return modal_fusion
+        return modal_fusion, se_out
 
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
